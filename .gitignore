@@ -1,0 +1,9 @@
+Session.vim
+/vendor/
+*.test
+*.out
+.idea/
+.vscode/
+*.swp
+.DS_Store
+coverage.out
