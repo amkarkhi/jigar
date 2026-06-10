@@ -3,7 +3,7 @@ package jigar
 import (
 	"context"
 	"fmt"
-	"sync"
+	"sync/atomic"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -25,10 +25,9 @@ type Tracer struct {
 	provider *sdktrace.TracerProvider
 }
 
-var (
-	defaultMu     sync.RWMutex
-	defaultTracer *Tracer
-)
+// defaultTracer is read on every Start call — kept as an atomic pointer so
+// the hot path is lock-free. Init writes it once at boot.
+var defaultTracer atomic.Pointer[Tracer]
 
 // New builds a Tracer from the given options without touching package-level
 // state. Use this when you want explicit control of the tracer's lifetime
@@ -95,30 +94,25 @@ func New(ctx context.Context, opts ...Option) (*Tracer, error) {
 // called more than once; subsequent calls return the existing tracer and
 // ignore the new options.
 func Init(ctx context.Context, opts ...Option) (*Tracer, error) {
-	defaultMu.Lock()
-	if defaultTracer != nil {
-		t := defaultTracer
-		defaultMu.Unlock()
+	if t := defaultTracer.Load(); t != nil {
 		return t, nil
 	}
-	defaultMu.Unlock()
-
 	t, err := New(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
-	defaultMu.Lock()
-	defaultTracer = t
-	defaultMu.Unlock()
+	// CompareAndSwap so a racing Init doesn't replace an already-installed
+	// tracer; whichever loser created a Tracer just discards it.
+	if !defaultTracer.CompareAndSwap(nil, t) {
+		return defaultTracer.Load(), nil
+	}
 	return t, nil
 }
 
 // Default returns the tracer installed by Init, or nil if Init has not been
-// called. The package-level Start uses this.
+// called. The package-level Start uses this on every span — kept lock-free.
 func Default() *Tracer {
-	defaultMu.RLock()
-	defer defaultMu.RUnlock()
-	return defaultTracer
+	return defaultTracer.Load()
 }
 
 // Shutdown flushes pending spans and shuts down the underlying provider.
